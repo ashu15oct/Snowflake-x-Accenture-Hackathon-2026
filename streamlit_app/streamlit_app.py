@@ -1,7 +1,6 @@
 import streamlit as st
 import _snowflake
 import json
-
 st.title("List Cortex Agents")
 
 DB = "RETAIL_DB"
