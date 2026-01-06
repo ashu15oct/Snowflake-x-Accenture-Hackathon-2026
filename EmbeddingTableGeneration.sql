@@ -126,9 +126,12 @@ LEFT JOIN BUY B ON F.BUY_ID = B.ID;
 -- ON GT.IDABT = F.ABT_ID
 -- AND GT.IDBUY = F.BUY_ID;
 
-
 CREATE OR REPLACE VIEW matching_metrics AS
-WITH gt AS (
+
+WITH cfg AS (
+    SELECT similarity_threshold AS t
+    FROM match_config
+), gt AS (
     SELECT DISTINCT IDABT, IDBUY
     FROM ABT_BUY_PERFECTMAPPING
 ),
@@ -176,6 +179,7 @@ counts AS (
         (SELECT COUNT(*) FROM fn)      AS false_negatives
 )
 SELECT
+    cfg.t AS similarity_threshold,
     total_ground_truth_pairs,
     total_predicted_pairs,
     true_positives,
@@ -220,4 +224,5 @@ SELECT
         SELECT COUNT(DISTINCT g2.IDABT)
         FROM gt g2
     ), 0)::FLOAT, 4) AS abt_coverage
-FROM counts;
+FROM counts
+CROSS JOIN cfg;
