@@ -1,6 +1,8 @@
 USE DATABASE RETAIL_DB;
 USE SCHEMA ABT_BUY;
 
+CREATE OR REPLACE TABLE match_config AS
+SELECT 0.80::FLOAT AS similarity_threshold;
 
 CREATE OR REPLACE VIEW abt_canonical AS
 SELECT
@@ -67,7 +69,10 @@ FROM (
         ROW_NUMBER() OVER (PARTITION BY ABT_ID ORDER BY SIMILARITY DESC) AS RN
     FROM SIMILARITY_SCORES
 )
-WHERE RN = 1 AND SIMILARITY >= 0.80;
+WHERE RN = 1 AND SIMILARITY >= (
+    SELECT SIMILARITY_THRESHOLD
+    FROM MATCH_CONFIG
+);
 
 SELECT
     COUNT(*) AS TOTAL_GROUND_TRUTH,
@@ -79,18 +84,19 @@ LEFT JOIN PRODUCT_MATCHES PM
 
 CREATE OR REPLACE VIEW final_product_matches AS
 SELECT
-    ABT_ID,
-    BUY_ID,
-    SIMILARITY,
+    p.ABT_ID,
+    p.BUY_ID,
+    p.SIMILARITY,
     'EMBEDDING_BASED' AS MATCH_STRATEGY,
     CASE
-        WHEN SIMILARITY >= 0.90 THEN 'HIGH'
-        WHEN SIMILARITY >= 0.85 THEN 'MEDIUM'
+        WHEN p.SIMILARITY >= (cfg.t + 0.6 * (1.0 - cfg.t)) THEN 'HIGH'
+        WHEN p.SIMILARITY >= (cfg.t + 0.4 * (1.0 - cfg.t)) THEN 'MEDIUM'
         ELSE 'LOW'
     END AS CONFIDENCE_BUCKET,
-    SIMILARITY AS FINAL_CONFIDENCE
-FROM PRODUCT_MATCHES
-WHERE SIMILARITY >= 0.80;
+    p.SIMILARITY AS FINAL_CONFIDENCE
+FROM PRODUCT_MATCHES p,
+     (SELECT similarity_threshold AS t FROM match_config) cfg
+WHERE p.SIMILARITY >= cfg.t;
 
 CREATE OR REPLACE VIEW price_comparison AS
 SELECT
@@ -107,18 +113,111 @@ FROM FINAL_PRODUCT_MATCHES AS F
 LEFT JOIN ABT A ON F.ABT_ID = A.ID
 LEFT JOIN BUY B ON F.BUY_ID = B.ID;
 
-CREATE OR REPLACE VIEW matching_metrics AS
-SELECT
-    COUNT(*) AS TOTAL_GROUND_TRUTH_PAIRS,
-    COUNT(F.ABT_ID) AS CORRECTLY_MATCHED_PAIRS,
-    ROUND(
-        COUNT(F.ABT_ID) / COUNT(*) :: FLOAT,
-        4
-    ) AS PRECISION
-FROM ABT_BUY_PERFECTMAPPING GT
-LEFT JOIN FINAL_PRODUCT_MATCHES F
-ON GT.IDABT = F.ABT_ID
-AND GT.IDBUY = F.BUY_ID;
+-- CREATE OR REPLACE VIEW matching_metrics AS
+-- SELECT
+--     COUNT(*) AS TOTAL_GROUND_TRUTH_PAIRS,
+--     COUNT(F.ABT_ID) AS CORRECTLY_MATCHED_PAIRS,
+--     ROUND(
+--         COUNT(F.ABT_ID) / COUNT(*) :: FLOAT,
+--         4
+--     ) AS PRECISION
+-- FROM ABT_BUY_PERFECTMAPPING GT
+-- LEFT JOIN FINAL_PRODUCT_MATCHES F
+-- ON GT.IDABT = F.ABT_ID
+-- AND GT.IDBUY = F.BUY_ID;
 
-CREATE OR REPLACE TABLE match_config AS
-SELECT 0.80::FLOAT AS similarity_threshold;
+
+CREATE OR REPLACE VIEW matching_metrics AS
+WITH gt AS (
+    SELECT DISTINCT IDABT, IDBUY
+    FROM ABT_BUY_PERFECTMAPPING
+),
+pred AS (
+    SELECT DISTINCT ABT_ID, BUY_ID, MATCH_STRATEGY, FINAL_CONFIDENCE
+    FROM FINAL_PRODUCT_MATCHES
+),
+
+-- True Positives: predicted pairs that exist in ground truth
+tp AS (
+    SELECT p.ABT_ID, p.BUY_ID
+    FROM pred p
+    INNER JOIN gt g
+        ON p.ABT_ID = g.IDABT
+       AND p.BUY_ID = g.IDBUY
+),
+
+-- False Positives: predicted pairs that are NOT in ground truth
+fp AS (
+    SELECT p.ABT_ID, p.BUY_ID
+    FROM pred p
+    LEFT JOIN gt g
+        ON p.ABT_ID = g.IDABT
+       AND p.BUY_ID = g.IDBUY
+    WHERE g.IDABT IS NULL
+),
+
+-- False Negatives: ground truth pairs that were NOT predicted
+fn AS (
+    SELECT g.IDABT, g.IDBUY
+    FROM gt g
+    LEFT JOIN pred p
+        ON p.ABT_ID = g.IDABT
+       AND p.BUY_ID = g.IDBUY
+    WHERE p.ABT_ID IS NULL
+),
+
+-- Aggregate counts
+counts AS (
+    SELECT
+        (SELECT COUNT(*) FROM gt)      AS total_ground_truth_pairs,
+        (SELECT COUNT(*) FROM pred)    AS total_predicted_pairs,
+        (SELECT COUNT(*) FROM tp)      AS true_positives,
+        (SELECT COUNT(*) FROM fp)      AS false_positives,
+        (SELECT COUNT(*) FROM fn)      AS false_negatives
+)
+SELECT
+    total_ground_truth_pairs,
+    total_predicted_pairs,
+    true_positives,
+    false_positives,
+    false_negatives,
+
+    -- Precision = TP / (TP + FP)
+    ROUND(
+        true_positives / NULLIF((true_positives + false_positives), 0)::FLOAT,
+        4
+    ) AS precision,
+
+    -- Recall = TP / (TP + FN)
+    ROUND(
+        true_positives / NULLIF((true_positives + false_negatives), 0)::FLOAT,
+        4
+    ) AS recall,
+
+    -- F1 = 2 * P * R / (P + R)
+    ROUND(
+        CASE
+            WHEN (NULLIF((true_positives + false_positives), 0) IS NULL)
+              OR (NULLIF((true_positives + false_negatives), 0) IS NULL) THEN NULL
+            ELSE
+                /* compute using counts to avoid rounding twice */
+                2 * (true_positives::FLOAT) /
+                NULLIF(
+                    ((true_positives + false_positives)::FLOAT) +
+                    ((true_positives + false_negatives)::FLOAT),
+                    0
+                )
+        END,
+        4
+    ) AS f1,
+
+    -- Coverage: fraction of ABT_IDs in GT that received at least one prediction
+    ROUND((
+        SELECT COUNT(DISTINCT g.IDABT)
+        FROM gt g
+        JOIN pred p ON p.ABT_ID = g.IDABT
+    ) / NULLIF((
+        SELECT COUNT(DISTINCT g2.IDABT)
+        FROM gt g2
+    ), 0)::FLOAT, 4) AS abt_coverage
+FROM counts;

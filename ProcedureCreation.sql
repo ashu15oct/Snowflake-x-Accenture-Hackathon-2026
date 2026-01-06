@@ -13,7 +13,7 @@ begin
 end;
 $$;
 
-create or replace procedure update_product_matching()
+create or replace procedure update_product_matches()
 returns string not null
 language sql
 as
@@ -132,3 +132,31 @@ end;
 $$;
 
 call generate_canonical_and_embeddings();
+
+create or replace procedure update_similarity_scores()
+returns string not null
+language sql
+as
+$$
+begin
+    create or replace table retail_db.abt_buy.similarity_scores as
+    with similarity_scores_cte as (
+        select
+            a.product_id as abt_id,
+            b.product_id as buy_id,
+            vector_cosine_similarity(a.embedding, b.embedding) as similarity
+        from abt_embeddings a
+        cross join buy_embeddings b
+    )
+    select
+        abt_id,
+        buy_id,
+        similarity
+    from similarity_scores_cte
+    order by similarity desc;
+    
+    return 'successfully updated similarity scores table';
+end;
+$$;
+
+call update_similarity_scores();
