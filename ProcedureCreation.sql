@@ -1,7 +1,7 @@
 use database retail_db;
 use schema abt_buy;
 
-create or replace procedure update_similarity_threshold(new_threshold float)
+create or replace procedure retail_db.abt_buy.update_similarity_threshold(new_threshold float)
 returns string not null
 language sql
 as
@@ -13,7 +13,7 @@ begin
 end;
 $$;
 
-create or replace procedure update_product_matches()
+create or replace procedure retail_db.abt_buy.update_product_matches()
 returns string not null
 language sql
 as
@@ -66,7 +66,7 @@ set default_model = (
     where model_id=7
 );
 
-create or replace procedure generate_canonical_and_embeddings()
+create or replace procedure retail_db.abt_buy.generate_canonical_and_embeddings()
   returns string not null
   language sql
 as
@@ -129,7 +129,7 @@ begin
 end;
 $$;
 
-create or replace procedure update_similarity_scores()
+create or replace procedure retail_db.abt_buy.update_similarity_scores()
 returns string not null
 language sql
 as
@@ -152,5 +152,61 @@ begin
     order by similarity desc;
     
     return 'successfully updated similarity scores table';
+end;
+$$;
+
+create or replace procedure retail_db.abt_buy.update_product_matches_top_k()
+returns string not null
+language sql
+as
+$$
+declare
+    v_top_k integer;
+begin
+    select default_top_k into :v_top_k
+    from retail_db.abt_buy.match_config limit 1;
+
+    -- Guardrail: ensure k >= 1
+    if (:v_top_k is null or :v_top_k < 1) then
+        set v_top_k = 1;
+    end if;
+
+    -- Build the top-k matches table (no threshold)
+    create or replace table retail_db.abt_buy.product_matches_top_k as
+    select
+        abt_id,
+        buy_id,
+        similarity,
+        row_number() over (
+            partition by abt_id
+            order by similarity desc, buy_id
+        ) as rank
+    from retail_db.abt_buy.similarity_scores
+    qualify rank <= :v_top_k
+    order by abt_id, rank;
+
+    return 'updated product_matches_top_k using k=' || to_varchar(:v_top_k);
+end;
+$$;
+
+create or replace procedure retail_db.abt_buy.update_default_top_k(new_top_k number)
+returns string not null
+language sql
+as
+$$
+declare
+    v_buy_count number;
+begin
+    select count(distinct buy_id) into :v_buy_count 
+    from retail_db.abt_buy.product_matches;
+    
+    if (:new_top_k < 1 or :new_top_k > :v_buy_count) then
+        return 'invalid top_k value. must be between 1 and ' || :v_buy_count;
+    end if;
+    
+    update retail_db.abt_buy.match_config
+    set default_top_k = :new_top_k;
+    
+    return 'successfully updated default_top_k to ' || :new_top_k;
 end;
 $$;
