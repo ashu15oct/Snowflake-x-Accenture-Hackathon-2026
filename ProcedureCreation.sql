@@ -43,38 +43,21 @@ end;
 $$;
 
 create or replace table retail_db.abt_buy.model_config (
-    model_name varchar()
+    model_name varchar,
+    model_id number
 ) as 
-select column1 as model_name FROM VALUES 
-    ('snowflake-arctic-embed-l-v2.0'),
-    ('snowflake-arctic-embed-l-v2.0-8k'),
-    ('nv-embed-qa-4'),
-    ('multilingual-e5-large'),
-    ('voyage-multilingual-2'),
-    ('snowflake-arctic-embed-m-v1.5'),
-    ('snowflake-arctic-embed-m'),
-    ('e5-base-v2');
+select column1, column2 from values
+    ('snowflake-arctic-embed-l-v2.0', 1),
+    ('snowflake-arctic-embed-l-v2.0-8k', 2),
+    ('nv-embed-qa-4', 3),
+    ('multilingual-e5-large', 4),
+    ('voyage-multilingual-2', 5),
+    ('snowflake-arctic-embed-m-v1.5', 6),
+    ('snowflake-arctic-embed-m', 7),
+    ('e5-base-v2', 8);
 
 alter table retail_db.abt_buy.match_config
 add column default_model varchar;
-
-alter table retail_db.abt_buy.model_config
-add column model_id number;
-
-update retail_db.abt_buy.model_config as mc
-set model_order = v.pos
-from (
-  select * from values
-    (1, 'snowflake-arctic-embed-l-v2.0'),
-    (2, 'snowflake-arctic-embed-l-v2.0-8k'),
-    (3, 'nv-embed-qa-4'),
-    (4, 'multilingual-e5-large'),
-    (5, 'voyage-multilingual-2'),
-    (6, 'snowflake-arctic-embed-m-v1.5'),
-    (7, 'snowflake-arctic-embed-m'),
-    (8, 'e5-base-v2')
-) v(pos, model_name)
-where mc.model_name = v.model_name;
 
 update retail_db.abt_buy.match_config
 set default_model = (
@@ -84,54 +67,67 @@ set default_model = (
 );
 
 create or replace procedure generate_canonical_and_embeddings()
-returns string not null
-language sql
+  returns string not null
+  language sql
 as
 $$
 declare
-v_model string;
+  v_sql   string;
+  v_model string;
 begin
-select default_model
-into :v_model
-from retail_db.abt_buy.match_config
-where default_model is not null
-limit 1;
-    -- Create canonical view for ABT
+  -- Get model from config
+  select model_name
+    into v_model
+  from retail_db.abt_buy.model_config
+  limit 1;
+
+  -- Create canonical view for ABT
+  v_sql := '
     create or replace view retail_db.abt_buy.abt_canonical as
     select 
-        price,
-        id as product_id,
-        concat_ws(' ', name, description) as clean_text
-    from retail_db.abt_buy.abt;
+      price,
+      id as product_id,
+      concat_ws('' '', name, description) as clean_text
+    from retail_db.abt_buy.abt
+  ';
+  execute immediate v_sql;
 
-    -- Create canonical view for BUY
+  -- Create canonical view for BUY
+  v_sql := '
     create or replace view retail_db.abt_buy.buy_canonical as
     select 
-        price,
-        id as product_id,
-        concat_ws(' ', name, manufacturer, description) as clean_text
-    from retail_db.abt_buy.buy;
+      price,
+      id as product_id,
+      concat_ws('' '', name, manufacturer, description) as clean_text
+    from retail_db.abt_buy.buy
+  ';
+  execute immediate v_sql;
 
-    -- Generate embeddings for ABT
+  -- Generate embeddings for ABT
+  v_sql := '
     create or replace table retail_db.abt_buy.abt_embeddings as
     select 
-        product_id,
-        clean_text,
-        ai_embed(:v_model, clean_text) as embedding
-    from retail_db.abt_buy.abt_canonical;
+      product_id,
+      clean_text,
+      ai_embed(''' || v_model || ''', clean_text) as embedding
+    from retail_db.abt_buy.abt_canonical
+  ';
+  execute immediate v_sql;
 
-    -- Generate embeddings for BUY
+  -- Generate embeddings for BUY
+  v_sql := '
     create or replace table retail_db.abt_buy.buy_embeddings as
     select 
-        product_id,
-        ai_embed(:v_model, clean_text) as embedding
-    from retail_db.abt_buy.buy_canonical;
+      product_id,
+      clean_text,
+      ai_embed(''' || v_model || ''', clean_text) as embedding
+    from retail_db.abt_buy.buy_canonical
+  ';
+  execute immediate v_sql;
 
-    return 'Successfully generated canonical views and embeddings for ABT and BUY tables';
+  return 'Successfully generated canonical tables and embeddings for ABT and BUY tables';
 end;
 $$;
-
-call generate_canonical_and_embeddings();
 
 create or replace procedure update_similarity_scores()
 returns string not null
@@ -158,5 +154,3 @@ begin
     return 'successfully updated similarity scores table';
 end;
 $$;
-
-call update_similarity_scores();
