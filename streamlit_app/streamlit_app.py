@@ -1,6 +1,9 @@
 import streamlit as st
 import _snowflake
 import json
+from snowflake.snowpark.context import get_active_session
+
+session = get_active_session()
 
 DB = "RETAIL_DB"
 SCHEMA = "ABT_BUY"
@@ -29,6 +32,26 @@ def select_agent(agents):
     selected_display = st.radio("", labels, label_visibility = "collapsed")
     selected_agent = next(agent for agent in agents if agent['profile']['display_name'] == selected_display)
     return selected_agent
+
+def ask_agent(api_endpoint, prompt):
+    body = {
+      "messages": [
+        {
+            "role": "user",
+            "content": [
+            {
+              "type": "text",
+              "text": prompt
+            }
+          ]
+        }
+      ],
+    }
+    headers = {"Accept": "text/event-stream"}
+    resp = _snowflake.send_snow_api_request(
+        "POST", api_endpoint, headers, {}, body, None, TIMEOUT_MS
+    )
+    st.write(resp)
     
 def main():
     st.title("Retail Intelligence Platform")
@@ -37,10 +60,14 @@ def main():
     agent_object = select_agent(agents)
     agent_object_name = agent_object['name']
     
-    api = f"/api/v2/databases/{DB}/schemas/{SCHEMA}/agents/{agent_object_name}:run"
+    api_endpoint = f"/api/v2/databases/{DB}/schemas/{SCHEMA}/agents/{agent_object_name}:run"
 
     st.subheader(f"Ask the {agent_object['profile']['display_name']}")
     prompt = st.text_input("", "Show price comparisons", label_visibility="collapsed")
+    
+    if st.button("Run"):
+        with st.spinner("Thinking", show_time=True):
+            ask_agent(api_endpoint, prompt)
 
 if __name__ == "__main__":
     main()
